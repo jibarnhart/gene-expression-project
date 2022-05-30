@@ -1,2 +1,2 @@
-# lasso-and-ridge
-Project fitting lasso and ridge regression with cross validation 
+# regressions
+A few projects concerning fitting different regression models
