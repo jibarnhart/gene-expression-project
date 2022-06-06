@@ -1,0 +1,103 @@
+---
+title: "Logistic regression on credit data"
+author: "Jarod Barnhart"
+date: "5/30/2022"
+output:
+  html_document: default
+---
+This project is based around creating a logistic regression model to predict
+whether or not a client will fulfill their credit contract based on many 
+different predictors. The prediction is a binary outcome response variable. The
+data is also in German, so some translation is required.
+``` {r, include=FALSE}
+library('rmarkdown')
+library('glmnet')
+library('tidyverse')
+library('ROSE')
+library('caTools')
+library('leaps')
+library('caret')
+```
+
+``` {r, include=FALSE}
+#Reading in data
+kredit<-read.table('data/SouthGermanCredit.asc',header=T)
+names<-c('status','duration','credit_history','purpose','amount','savings',
+         'employment_duration','installment_rate','personal_status_sex',
+         'other_debtors','present_residence','property','age','other_installment_plans',
+         'housing','number_credits','job','people_liable','telephone',
+         'foreign_worker','credit_risk')
+colnames(kredit)<-names
+
+#Coercing categorical variables to factors
+categorical<-c('status','credit_history','purpose','savings','personal_status_sex',
+               'other_debtors','other_installment_plans','housing','telephone',
+               'foreign_worker','credit_risk')
+
+kredit[categorical] <- lapply(kredit[categorical],factor)
+```
+
+``` {r echo=FALSE}
+#Splitting into training and testing data
+smp_size <- floor(0.75*nrow(kredit))
+set.seed(1337)
+train_ind<-sample(seq_len(nrow(kredit)), size = smp_size)
+kredit_train <- kredit[train_ind, ]
+kredit_test <- kredit[-train_ind, ]
+```
+After reading in our data, and splitting into training and testing, we make an 
+initial logistic regression model.
+```{r}
+# Logistic regression
+kredit_logit <- glm(credit_risk~status+duration+credit_history+purpose+amount+
+                      savings+employment_duration+installment_rate+personal_status_sex+
+                      other_debtors+present_residence+property+age+other_installment_plans+
+                      housing+number_credits+job+people_liable+telephone+foreign_worker,
+                    data=kredit_train,family=binomial)
+summary(kredit_logit)
+```
+There are quite a few variables which are factors, and many levels are 
+insignificant. From here we use sequential replacement variable selection,
+maxing out the number of variables at 11
+``` {r, results="hide"}
+#Sequential replacement variable selection with max 11 variables
+kredit_models<-regsubsets(credit_risk~status+duration+credit_history+purpose+amount+
+                            savings+employment_duration+installment_rate+personal_status_sex+
+                            other_debtors+present_residence+property+age+other_installment_plans+
+                            housing+number_credits+job+people_liable+telephone+foreign_worker,
+                          data = kredit_train, nvmax = 11, method = "seqrep")
+summary(kredit_models)
+```
+We can reduce our model down to a few significant variables.
+```{r}
+kredit_reduced<-glm(credit_risk~status+credit_history+purpose+amount+savings+
+                      installment_rate+telephone,
+                    data=kredit_train,family=binomial)
+summary(kredit_reduced)
+```
+Let us test this reduced logistic model.
+```{r}
+kredit_reduced_test<-glm(credit_risk~status+credit_history+purpose+amount+savings+
+                           installment_rate+telephone,
+                         data=kredit_test,family=binomial)
+summary(kredit_reduced_test)
+```
+Very few of the variables which were significant in the training model are 
+significant on the testing data. Lets construct an ROC curve to analyze
+performance.
+```{r}
+### c.) ROC Curve
+prob_train <- predict(kredit_logit, type = "response")
+pred_train<- ifelse(prob_train > 0.5, "1", "0")
+prob_test <- predict(kredit_logit, kredit_test, type = "response")
+pred_test<- ifelse(prob_test > 0.5, "1", "0")
+probabilities_train <- predict(kredit_reduced, type = "response")
+predicted.classes_train<- ifelse(probabilities_train > 0.5, "1", "0")
+probabilities_test <- predict(kredit_reduced, kredit_test, type = "response")
+predicted.classes_test<- ifelse(probabilities_test > 0.5, "1", "0")
+
+roc.curve(kredit_train$credit_risk, predicted.classes_train) #AUC=0.673
+roc.curve(kredit_test$credit_risk, predicted.classes_test) #AUC=0.640
+roc.curve(kredit_train$credit_risk, pred_train) #AUC=0.712
+roc.curve(kredit_test$credit_risk, pred_test) #AUC0.691
+```

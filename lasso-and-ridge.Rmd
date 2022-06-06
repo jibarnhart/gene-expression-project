@@ -1,0 +1,261 @@
+---
+title: "Fitting ridge and lasso regressions on gene expression data"
+author: "Jarod Barnhart"
+date: "5/30/2022"
+output: html_document
+---
+```{r, include=F}
+library('rmarkdown')
+library('glmnet')
+library('tidyverse')
+library('ROSE')
+library('caTools')
+library('leaps')
+library('caret')
+```
+The data we will be using in this project is gene expression data, where we are
+looking to develop a model that will be used to predict tumor type. Tumor type 
+is a multi-class outcome variable and because there are many more gene variables
+than there are samples we must use Ridge and Lasso regression to model it. The 
+possible tumor types are BRCA, COAD, KIRC, LUAD, and PRAD.
+```{r, include=F}
+# Defining some useful functions
+removeZeroVar <- function(df){ ## Removes any column where the variance is 0
+                               ## This doubles to remove any column of all 0's
+                               ## It is also very fast!!
+  df[, !sapply(df, function(x) min(x) == max(x))]
+}
+removeSmallVar <- function(df){ ## Removes any column with small variance
+  df[, !sapply(df, function(x) var(x) < 0.001)]
+}
+
+standardize <- function(df){
+  apply(df, 2, function(x) scale(x))
+}
+```
+After loading in a few packages, defining a few useful functions we read in the
+data:
+```{r , results="hide"}
+genes<-read.csv('data/gene_data.csv',header=T)
+
+colnames(genes)[1]<-'sample'
+genes_sample<-genes[,1]
+genes_no_sample<-genes[,-1]
+```
+We separate the the gene data into two dataframes, one of just the labels of 
+each sample, and one of the actual data. This will make using some functions
+later easier.
+
+One of the assumptions of the models we will be building is a lack of zero or 
+small variance columns. So we find any columns like this and remove them from 
+our model. Small variance columns can lead us to believe that those columns have 
+more impact than they actually do. Zero variance columns actually make it 
+impossible to run a these models, so they must be removed.
+Also, we standardize our data. Lasso and Ridge regression requires that each 
+variable be centered and reduced, therefore we standardize.
+```{r, results="hide"}
+## Removing small variance and zero columns
+genes_removed<-removeZeroVar(genes_no_sample)
+genes_removed<-removeSmallVar(genes_removed)
+
+## standardizing
+genes_removed<-standardize(genes_removed)
+
+genes_removed_sample<-data.frame(genes_sample,genes_removed)
+colnames(genes_removed_sample)[1] <- 'sample'
+
+labels<-read.csv('data/gene_labels.csv',header=T)
+colnames(labels)[1]<-'sample'
+labels[,2]<-as.factor(labels[,2])
+labels[,2]<-as.numeric(labels[,2])
+
+## merging
+gene_data<-merge(labels,genes_removed_sample,by='sample')
+```
+
+After standardizing our data, we separate it into training and validation sets.
+```{r, results="hide"}
+## training and testing
+smp_size2 <- floor(0.75*nrow(gene_data))
+set.seed(1337)
+gene_ind<-sample(seq_len(nrow(gene_data)), size = smp_size2)
+gene_train <- gene_data[gene_ind, ]
+gene_test <- gene_data[-gene_ind,]
+```
+
+Then we separate the training and validation data into their respective
+predictor and response vectors. This makes it easier to run them through the
+functions.
+```{r}
+# Split the training and testing data into predictors and response
+xtrain<-as.matrix(gene_train[,-c(1,2)])
+ytrain<-gene_train[,2]
+xtest<-as.matrix(gene_test[,-c(1,2)])
+ytest<-gene_test[,2]
+```
+
+## Ridge Regression
+Now, we use 10-fold cross validation to find our optimal lambda value for our
+ridge regression.
+```{r}
+## Cross-validating glm models to get optimal lambda
+cv_fit <- cv.glmnet(xtrain, ytrain, alpha=0,nfolds = 10,family='multinomial')
+lambda<-cv_fit$lambda.min ##optimal lambda is 4.3942
+plot(cv_fit)
+```
+From our cross validation, we find that the optimal lambda value is 4.3942, so 
+we make our model using the optimal lambda.
+```{r}
+## making new ridge model using optimal lambda
+ridge<-glmnet(xtrain,ytrain,lambda=lambda,alpha=0,family='multinomial')
+```
+We take the predictions from our model, classifying the prediction based on the
+largest probability returned from the model. This helps us make the confusion
+matrix.
+```{r}
+## making the predictions from the model, classifying based on largest probability
+pred_train_ridge<-as.numeric(predict(ridge,s=lambda,newx=xtrain,type='class'))
+pred_test_ridge<-as.numeric(predict(ridge,s=lambda,newx=xtest,type='class'))
+```
+Now we make the confusion matrices for the training and validation sets.
+```{r}
+## making confusion matrices
+confusion.glmnet(ridge, newx=xtrain, newy=ytrain)
+confusion.glmnet(ridge, newx=xtest,newy=ytest)
+```
+From the confusion matrices, we can see that these models have predicted 
+perfectly. This obviously won't be the case in any case using real data.
+
+
+## Lasso Regression
+Now, we fit a Lasso Regression to the data
+First, we begin with the 10-fold cross validation to find the optimal parameter
+```{r}
+cv_lasso<-cv.glmnet(x=xtrain,y=ytrain,alpha=1,nfolds=10,family='multinomial')
+plot(cv_lasso)
+```
+Now we make the new lasso regression using the optimal parameter.
+```{r}
+lambdalasso<-cv_lasso$lambda.min
+lasso<-glmnet(x=xtrain,y=ytrain,alpha=1,family='multinomial',lambda=lambdalasso)
+```
+And finally, we take our predictions, and make our confusion matrices.
+```{r}
+pred_train_lasso<-as.numeric(predict(lasso,s=lambdalasso,newx=xtrain,type='class'))
+pred_test_lasso<-as.numeric(predict(lasso,s=lambdalasso,newx=xtest,type='class'))
+
+confusion.glmnet(lasso, newx=xtrain,newy=ytrain)
+confusion.glmnet(lasso, newx=xtest,newy=ytest)
+```
+We can see that in the lasso testing, there is 1 sample that the lasso model
+predicts incorrectly, but I think if we really wanted to test these two models,
+we would need some new data.
+
+From the Lasso model, we can actual see the most relevant genes for the 
+different classes of tumor.
+
+For the BRCA class:
+```{r}
+lasso_coefs_BRCA=(coef(cv_lasso,s='lambda.1se')$'1')[-1]
+BRCA_nonzero_coefs=which(lasso_coefs_BRCA!=0)
+selected_BRCA_values=lasso_coefs_BRCA[BRCA_nonzero_coefs]
+selected_BRCA_names=names(gene_data)[BRCA_nonzero_coefs]
+df_BRCA=data.frame(BRCA_related_gene=selected_BRCA_names,coef_val=selected_BRCA_values)
+print(df_BRCA)
+```
+The top 4 genes from the results are the most relevant genes.
+4 Most relevant genes are 5576, 6746, 6874, 7962
+
+COAD Class:
+```{r}
+lasso_coefs_COAD=(coef(cv_lasso,s='lambda.1se')$'2')[-1]
+COAD_nonzero_coefs=which(lasso_coefs_COAD!=0)
+selected_COAD_values=lasso_coefs_COAD[COAD_nonzero_coefs]
+selected_COAD_names=names(gene_data)[COAD_nonzero_coefs]
+df_COAD=data.frame(COAD_related_gene=selected_COAD_names,coef_val=selected_COAD_values)
+print(df_COAD)
+```
+4 Most relevant genes are 2035, 3521, 7236, 10458
+
+KIRC Class:
+```{r}
+lasso_coefs_KIRC=(coef(cv_lasso,s='lambda.1se')$'3')[-1]
+KIRC_nonzero_coefs=which(lasso_coefs_KIRC!=0)
+selected_KIRC_values=lasso_coefs_KIRC[KIRC_nonzero_coefs]
+selected_KIRC_names=names(gene_data)[KIRC_nonzero_coefs]
+df_KIRC=data.frame(KIRC_related_gene=selected_KIRC_names,coef_val=selected_KIRC_values)
+print(df_KIRC)
+```
+4 Most relevant genes are 16, 217, 218, 4271
+
+LUAD Class:
+```{r}
+lasso_coefs_LUAD=(coef(cv_lasso,s='lambda.1se')$'4')[-1]
+LUAD_nonzero_coefs=which(lasso_coefs_LUAD!=0)
+selected_LUAD_values=lasso_coefs_LUAD[LUAD_nonzero_coefs]
+selected_LUAD_names=names(gene_data)[LUAD_nonzero_coefs]
+df_LUAD=data.frame(LUAD_related_gene=selected_LUAD_names,coef_val=selected_LUAD_values)
+print(df_LUAD)
+```
+4 Most relevant genes are 4629, 6759, 8314, 9711
+
+PRAD Class:
+```{r}
+lasso_coefs_PRAD=(coef(cv_lasso,s='lambda.1se')$'5')[-1]
+PRAD_nonzero_coefs=which(lasso_coefs_PRAD!=0)
+selected_PRAD_values=lasso_coefs_PRAD[PRAD_nonzero_coefs]
+selected_PRAD_names=names(gene_data)[PRAD_nonzero_coefs]
+df_PRAD=data.frame(PRAD_related_gene=selected_PRAD_names,coef_val=selected_PRAD_values)
+print(df_PRAD)
+```
+4 Most relevant genes are 3735, 9173, 9174, 12846
+
+What the most relevant genes tell us is similar to what is returned from a
+principal component analysis. These 4 genes are the genes that have the most
+impact on what type of tumor is predicted.
+
+Out of curiosity, lets make a new model out of just the relevant genes.
+We start by filtering our data to just the genes we deemed relevant, along with
+the sample name and the class.
+```{r}
+most_relevant_genes<-c('gene_5576', 'gene_6746', 'gene_6874', 'gene_7962',
+                       'gene_2035', 'gene_3521', 'gene_7236', 'gene_10458',
+                       'gene_16', 'gene_217', 'gene_218', 'gene_4271',
+                       'gene_4629', 'gene_6759', 'gene_8314', 'gene_9711',
+                       'gene_3735', 'gene_9173', 'gene_9174', 'gene_12846')
+reduced_data_train<-gene_train[,c('sample','Class',most_relevant_genes)]
+reduced_data_test<-gene_test[,c('sample','Class',most_relevant_genes)]
+```
+
+```{r}
+# Split the training and testing data into predictors and response
+x_reduced_train<-as.matrix(reduced_data_train[,-c(1,2)])
+y_reduced_train<-reduced_data_train[,2]
+x_reduced_test<-as.matrix(reduced_data_test[,-c(1,2)])
+y_reduced_test<-reduced_data_test[,2]
+```
+
+```{r}
+cv_lasso_reduced<-cv.glmnet(x=x_reduced_train,y=y_reduced_train,alpha=1,
+                            nfolds=10,family='multinomial')
+plot(cv_lasso_reduced)
+```
+
+```{r}
+lambda_lasso_reduced<-cv_lasso_reduced$lambda.min
+lasso_reduced<-glmnet(x=x_reduced_train,y=y_reduced_train,alpha=1,
+                      family='multinomial', lambda=lambda_lasso_reduced)
+```
+
+```{r}
+pred_train_lasso_reduced<-as.numeric(predict(lasso_reduced,s=lambda_lasso_reduced,
+                                            newx=x_reduced_train, type='class'))
+pred_test_lasso_reduced<-as.numeric(predict(lasso_reduced,s=lambda_lasso_reduced,
+                                            newx=x_reduced_test,type='class'))
+
+confusion.glmnet(lasso_reduced, newx=x_reduced_train,newy=y_reduced_train)
+confusion.glmnet(lasso_reduced, newx=x_reduced_test,newy=y_reduced_test)
+```
+In a lasso regression using only the most relevant genes, we can see that on 
+testing data, we are still getting a 95% correct model, which is fantastic.
+
