@@ -1,5 +1,10 @@
 ---
 title: "Fitting ridge and lasso regressions on gene expression data"
+  knit: (function(input_file, encoding) {
+    out_dir <- 'docs';
+    rmarkdown::render(input_file,
+      encoding=encoding,
+      output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
 author: "Jarod Barnhart"
 date: "5/30/2022"
 output: html_document
